@@ -741,7 +741,8 @@ void portable_option(const char* arg, const char* appimage_path, const char* nam
     }
 }
 
-// if private_prefix is set, the prefix directory keeps mode 0700 instead of getting the mode of the image's root
+// if private_prefix is set (extract-and-run), the prefix directory keeps mode 0700 instead of getting the mode of the
+// image's root, and all directories below it keep full owner permissions so that rm_recursive() can remove them again
 bool extract_appimage(const char* const appimage_path, const char* const _prefix, const char* const _pattern,
                       const bool overwrite, const bool verbose, const bool private_prefix) {
     sqfs_err err = SQFS_OK;
@@ -778,7 +779,8 @@ bool extract_appimage(const char* const appimage_path, const char* const _prefix
     }
 
     // directories are created with mode 0700 while extracting, their stored modes are applied after extraction
-    // there cannot be more directories than inodes
+    // there cannot be more directories than inodes, which bounds this array at 16 bytes per inode of the image (on
+    // 64-bit), plus one copy of the path per directory; this memory is released as soon as the modes are applied
     struct dir_mode {
         char* path;
         mode_t mode;
@@ -813,8 +815,15 @@ bool extract_appimage(const char* const appimage_path, const char* const _prefix
                     rv = false;
                     break;
                 }
-                dir_modes[dir_modes_count].path = strdup(prefixed_path_to_extract);
+                if ((dir_modes[dir_modes_count].path = strdup(prefixed_path_to_extract)) == NULL) {
+                    fprintf(stderr, "Failed allocating memory to track directory modes\n");
+                    rv = false;
+                    break;
+                }
                 dir_modes[dir_modes_count].mode = dir_inode.base.mode & 07777;
+                // rm_recursive() needs to read, search and write a directory to remove its contents
+                if (private_prefix)
+                    dir_modes[dir_modes_count].mode |= S_IRWXU;
                 dir_modes_count++;
             }
 
